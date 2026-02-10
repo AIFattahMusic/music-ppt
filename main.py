@@ -7,67 +7,45 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
 
-# ======================================================
-# CONFIG
-# ======================================================
+# ==================================================
+# INIT
+# ==================================================
 os.makedirs("media", exist_ok=True)
 
 SUNO_API_KEY = os.getenv("SUNO_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
-BASE_URL = os.getenv("BASE_URL", "https://music-ppt.onrender.com")
+
+BASE_URL = os.getenv(
+    "BASE_URL",
+    "https://music-ppt.onrender.com"
+)
 
 CALLBACK_URL = f"{BASE_URL}/callback"
 
-SUNO_BASE = "https://api.kie.ai/api/v1"
-GENERATE_URL = f"{SUNO_BASE}/generate"
-STATUS_URL = f"{SUNO_BASE}/generate/record-info"
-LYRICS_URL = f"{SUNO_BASE}/generate/get-timestamped-lyrics"
-VIDEO_URL = f"{SUNO_BASE}/mp4/generate"
+SUNO_BASE_API = "https://api.kie.ai/api/v1"
+MUSIC_GENERATE_URL = f"{SUNO_BASE_API}/generate"
+STATUS_URL = f"{SUNO_BASE_API}/generate/record-info"
+LYRICS_URL = f"{SUNO_BASE_API}/generate/get-timestamped-lyrics"
+VIDEO_URL = f"{SUNO_BASE_API}/mp4/generate"
 
-app = FastAPI(title="AI Music Full Backend", version="V4_FULL_PIPELINE")
+app = FastAPI(
+    title="AI Music Suno API Wrapper",
+    version="2.0.0"
+)
+
 app.mount("/media", StaticFiles(directory="media"), name="media")
 
-# ======================================================
-# AUTO CREATE TABLE
-# ======================================================
-@app.on_event("startup")
-def init_db():
-    if not DATABASE_URL:
-        print("DATABASE_URL NOT SET")
-        return
-    conn = psycopg2.connect(DATABASE_URL)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS songs (
-            id SERIAL PRIMARY KEY,
-            audio_task_id TEXT UNIQUE,
-            video_task_id TEXT,
-            title TEXT,
-            audio_url TEXT,
-            video_url TEXT,
-            lyrics TEXT,
-            status TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
-    print("DB READY")
-
-# ======================================================
-# MODELS
-# ======================================================
-class GenerateRequest(BaseModel):
+# ================= REQUEST MODEL =================
+class GenerateMusicRequest(BaseModel):
     prompt: str
-    title: Optional[str] = "Untitled"
     style: Optional[str] = None
+    title: Optional[str] = None
     instrumental: bool = False
+    customMode: bool = False
+    model: str = "V4_5"
 
-# ======================================================
-# HELPERS
-# ======================================================
-def headers():
+# ================= HELPERS =================
+def suno_headers():
     if not SUNO_API_KEY:
         raise HTTPException(500, "SUNO_API_KEY not set")
     return {
@@ -75,12 +53,12 @@ def headers():
         "Content-Type": "application/json"
     }
 
-def db():
+def get_conn():
     if not DATABASE_URL:
         raise HTTPException(500, "DATABASE_URL not set")
     return psycopg2.connect(DATABASE_URL)
 
-def download_file(url: str, path: str):
+def save_file(url: str, path: str):
     with requests.get(url, stream=True, timeout=180) as r:
         r.raise_for_status()
         with open(path, "wb") as f:
@@ -88,104 +66,106 @@ def download_file(url: str, path: str):
                 if chunk:
                     f.write(chunk)
 
-# ======================================================
-# ROOT
-# ======================================================
+# ================= ROOT =================
 @app.get("/")
 def root():
-    return {"status": "running", "version": "V4_FULL_PIPELINE"}
+    return {"status": "running"}
 
-# ======================================================
-# GENERATE (APK HIT INI)
-# ======================================================
-@app.post("/generate")
-async def generate(payload: GenerateRequest):
+# ================= GENERATE MUSIC (TIDAK DIUBAH) =================
+@app.post("/generate-music")
+async def generate_music(payload: GenerateMusicRequest):
 
     body = {
-        "model": "V4_5",
-        "input": {
-            "prompt": payload.prompt,
-            "title": payload.title,
-            "style": payload.style,
-            "instrumental": payload.instrumental
-        },
+        "prompt": payload.prompt,
+        "customMode": payload.customMode,
+        "instrumental": payload.instrumental,
+        "model": payload.model,
         "callBackUrl": CALLBACK_URL
     }
 
+    if payload.style:
+        body["style"] = payload.style
+    if payload.title:
+        body["title"] = payload.title
+
     async with httpx.AsyncClient(timeout=60) as client:
         res = await client.post(
-            GENERATE_URL,
-            headers=headers(),
+            MUSIC_GENERATE_URL,
+            headers=suno_headers(),
             json=body
         )
 
-    if res.status_code != 200:
-        raise HTTPException(500, res.text)
-
     return res.json()
 
-# ======================================================
-# CALLBACK
-# ======================================================
+# ================= CALLBACK =================
 @app.post("/callback")
 async def callback(request: Request):
     try:
         data = await request.json()
         print("CALLBACK:", data)
 
-        task_id = data.get("taskId")
-        raw = data.get("data")
+        task_id = data.get("taskId") or data.get("task_id")
+        items = data.get("data") or []
 
-        if isinstance(raw, list):
-            item = raw[0] if raw else None
-        elif isinstance(raw, dict):
-            item = raw
+        if isinstance(items, list):
+            item = items[0] if items else None
+        elif isinstance(items, dict):
+            item = items
         else:
-            return {"status": "ignored"}
+            item = None
 
         if not item:
-            return {"status": "no_item"}
+            return {"status": "ignored"}
 
         state = item.get("state") or item.get("status")
         if state != "succeeded":
             return {"status": "processing"}
 
-        audio_url = item.get("audioUrl") or item.get("streamAudioUrl")
-        video_url = item.get("videoUrl") or item.get("resultUrl")
+        audio_url = (
+            item.get("audioUrl")
+            or item.get("audio_url")
+            or item.get("streamAudioUrl")
+        )
 
-        conn = db()
+        video_url = (
+            item.get("videoUrl")
+            or item.get("video_url")
+            or item.get("resultUrl")
+        )
+
+        conn = get_conn()
         cur = conn.cursor()
 
-        # ==================================================
-        # AUDIO DONE
-        # ==================================================
+        # ================= AUDIO DONE =================
         if audio_url:
 
             audio_id = item.get("audioId")
             title = item.get("title", "Untitled")
 
+            # SAVE MP3
             mp3_path = f"media/{task_id}.mp3"
-            download_file(audio_url, mp3_path)
-            local_audio = f"{BASE_URL}/media/{task_id}.mp3"
+            save_file(audio_url, mp3_path)
+            local_audio_url = f"{BASE_URL}/media/{task_id}.mp3"
 
-            # ===== GET LYRICS =====
+            # ===== TAMBAHAN: GET LYRICS =====
             async with httpx.AsyncClient(timeout=60) as client:
-                lyr = await client.post(
+                lyrics_res = await client.post(
                     LYRICS_URL,
-                    headers=headers(),
+                    headers=suno_headers(),
                     json={
                         "taskId": task_id,
                         "audioId": audio_id
                     }
                 )
 
-            lyrics_data = lyr.json()
+            lyrics_data = lyrics_res.json()
+            print("LYRICS:", lyrics_data)
 
-            # ===== TRIGGER VIDEO =====
+            # ===== TAMBAHAN: TRIGGER VIDEO =====
             async with httpx.AsyncClient(timeout=60) as client:
-                vid = await client.post(
+                video_res = await client.post(
                     VIDEO_URL,
-                    headers=headers(),
+                    headers=suno_headers(),
                     json={
                         "taskId": task_id,
                         "audioId": audio_id,
@@ -195,29 +175,29 @@ async def callback(request: Request):
                     }
                 )
 
-            vid_json = vid.json()
-            print("VIDEO START:", vid_json)
+            video_json = video_res.json()
+            print("VIDEO START:", video_json)
 
             video_task_id = None
-            if vid_json.get("data"):
-                video_task_id = vid_json["data"].get("taskId")
+            if video_json.get("data"):
+                video_task_id = video_json["data"].get("taskId")
 
+            # SAVE DB
             cur.execute("""
-                INSERT INTO songs 
-                (audio_task_id, video_task_id, title, audio_url, lyrics, status)
+                INSERT INTO songs
+                (task_id, title, audio_url, lyrics, video_task_id, status)
                 VALUES (%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (audio_task_id)
-                DO UPDATE SET
-                    video_task_id=EXCLUDED.video_task_id,
+                ON CONFLICT (task_id) DO UPDATE SET
                     audio_url=EXCLUDED.audio_url,
                     lyrics=EXCLUDED.lyrics,
+                    video_task_id=EXCLUDED.video_task_id,
                     status='audio_done'
             """, (
                 task_id,
-                video_task_id,
                 title,
-                local_audio,
+                local_audio_url,
                 str(lyrics_data),
+                video_task_id,
                 "audio_done"
             ))
 
@@ -227,24 +207,19 @@ async def callback(request: Request):
 
             return {"status": "audio_saved_video_started"}
 
-        # ==================================================
-        # VIDEO DONE
-        # ==================================================
+        # ================= VIDEO DONE =================
         if video_url:
 
             mp4_path = f"media/{task_id}.mp4"
-            download_file(video_url, mp4_path)
-            local_video = f"{BASE_URL}/media/{task_id}.mp4"
+            save_file(video_url, mp4_path)
+            local_video_url = f"{BASE_URL}/media/{task_id}.mp4"
 
             cur.execute("""
                 UPDATE songs
                 SET video_url=%s,
                     status='done'
                 WHERE video_task_id=%s
-            """, (
-                local_video,
-                task_id
-            ))
+            """, (local_video_url, task_id))
 
             conn.commit()
             cur.close()
@@ -257,24 +232,19 @@ async def callback(request: Request):
         return {"status": "unknown"}
 
     except Exception as e:
-        print("CALLBACK ERROR:", str(e))
-        return {"error": str(e)}
+        print("CALLBACK ERROR:", e)
+        return {"status": "error", "error": str(e)}
 
-# ======================================================
-# STATUS UNTUK APK
-# ======================================================
-@app.get("/status/{audio_task_id}")
-def status(audio_task_id: str):
-
-    conn = db()
+# ================= STATUS UNTUK APK =================
+@app.get("/status/{task_id}")
+def status(task_id: str):
+    conn = get_conn()
     cur = conn.cursor()
-
     cur.execute("""
         SELECT title, audio_url, video_url, lyrics, status
         FROM songs
-        WHERE audio_task_id=%s
-    """, (audio_task_id,))
-
+        WHERE task_id=%s
+    """, (task_id,))
     row = cur.fetchone()
     cur.close()
     conn.close()
