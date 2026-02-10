@@ -6,23 +6,21 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
 
-# ================= CONFIG =================
 os.makedirs("media", exist_ok=True)
 
 SUNO_API_KEY = os.getenv("SUNO_API_KEY")
 BASE_URL = os.getenv("BASE_URL", "https://music-ppt.onrender.com")
-
 CALLBACK_URL = f"{BASE_URL}/callback"
 
 SUNO_BASE = "https://api.kie.ai/api/v1"
 GENERATE_URL = f"{SUNO_BASE}/generate"
+STATUS_URL = f"{SUNO_BASE}/generate/record-info"
 LYRICS_URL = f"{SUNO_BASE}/generate/get-timestamped-lyrics"
 VIDEO_URL = f"{SUNO_BASE}/mp4/generate"
 
 app = FastAPI(title="Suno Full Pipeline FINAL")
 app.mount("/media", StaticFiles(directory="media"), name="media")
 
-# ================= MODEL =================
 class GenerateRequest(BaseModel):
     prompt: str
     style: Optional[str] = None
@@ -31,7 +29,6 @@ class GenerateRequest(BaseModel):
     customMode: bool = False
     model: str = "V4_5"
 
-# ================= HELPERS =================
 def headers():
     if not SUNO_API_KEY:
         raise HTTPException(500, "SUNO_API_KEY not set")
@@ -48,7 +45,6 @@ def download(url, path):
                 if chunk:
                     f.write(chunk)
 
-# ================= ROOT =================
 @app.get("/")
 def root():
     return {"status": "running"}
@@ -72,6 +68,19 @@ async def generate(payload: GenerateRequest):
 
     return res.json()
 
+# ================= CHECK TASK =================
+@app.get("/check/{task_id}")
+async def check(task_id: str):
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        res = await client.get(
+            STATUS_URL,
+            headers=headers(),
+            params={"taskId": task_id}
+        )
+
+    return res.json()
+
 # ================= CALLBACK =================
 @app.post("/callback")
 async def callback(request: Request):
@@ -79,9 +88,7 @@ async def callback(request: Request):
     data = await request.json()
     print("CALLBACK:", data)
 
-    # ===================================================
-    # ===== 1️⃣ HANDLE MP4 CALLBACK (FORMAT BARU DOCS)
-    # ===================================================
+    # ===== HANDLE MP4 CALLBACK =====
     if data.get("code") == 0 and data.get("data", {}).get("video_url"):
 
         video_task_id = data["data"]["task_id"]
@@ -93,9 +100,7 @@ async def callback(request: Request):
         print("VIDEO SAVED:", video_task_id)
         return {"status": "video_saved"}
 
-    # ===================================================
-    # ===== 2️⃣ HANDLE AUDIO CALLBACK (FORMAT LAMA)
-    # ===================================================
+    # ===== HANDLE AUDIO CALLBACK =====
     task_id = data.get("taskId") or data.get("task_id")
     raw = data.get("data")
 
@@ -119,14 +124,11 @@ async def callback(request: Request):
 
         audio_id = item.get("audioId")
 
-        # ===== SAVE MP3 =====
         mp3_path = f"media/{task_id}.mp3"
         download(audio_url, mp3_path)
         print("AUDIO SAVED:", task_id)
 
-        # ===================================================
-        # ===== GET TIMESTAMPED LYRICS (SESUI DOCS)
-        # ===================================================
+        # ===== GET LYRICS =====
         async with httpx.AsyncClient(timeout=60) as client:
             lyr = await client.post(
                 LYRICS_URL,
@@ -138,22 +140,9 @@ async def callback(request: Request):
             )
 
         lyrics_json = lyr.json()
-        print("LYRICS RAW:", lyrics_json)
+        print("LYRICS:", lyrics_json)
 
-        aligned_words = []
-        if lyrics_json.get("code") == 200:
-            aligned_words = lyrics_json.get("data", {}).get("alignedWords", [])
-
-        # SIMPAN LIRIK KE FILE JSON
-        lyrics_path = f"media/{task_id}_lyrics.json"
-        with open(lyrics_path, "w", encoding="utf-8") as f:
-            f.write(str(aligned_words))
-
-        print("LYRICS SAVED:", lyrics_path)
-
-        # ===================================================
-        # ===== TRIGGER MP4 GENERATION
-        # ===================================================
+        # ===== TRIGGER VIDEO =====
         async with httpx.AsyncClient(timeout=60) as client:
             vid = await client.post(
                 VIDEO_URL,
