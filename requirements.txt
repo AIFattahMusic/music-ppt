@@ -1,7 +1,18 @@
+# Web Framework
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
+
+# Pydantic v1 - lebih stabil, tidak perlu Rust build
+pydantic==1.10.13
+
+# HTTP Clients
 httpx==0.25.2
 requests==2.31.0
-pydantic==2.5.0
-python-multipart==0.0.6
 
+# CORS
+cors==1.0.1
+
+# Additional dependencies
+python-multipart==0.0.6
+starlette==0.27.1
+typing-extensions==4.8.0
